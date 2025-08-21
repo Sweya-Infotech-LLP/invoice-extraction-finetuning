@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 from transformers import DonutProcessor, VisionEncoderDecoderModel
 import io
+from telecom_json import extract_invoice_json_telecom
 
 # Configure logging to both file and console
 def setup_logger(name: str, log_file: str):
@@ -138,6 +139,7 @@ async def root():
             "train": "POST /train-donut",
             "train_upload": "POST /train-donut-upload",
             "infer_donut": "POST /infer-donut",
+            "extract_invoice_json": "POST /extract-invoice-json",
             "process": "POST /process-invoice",
             "health": "GET /health",
             "model_status": "GET /model-status",
@@ -507,6 +509,83 @@ async def infer_donut(
         raise HTTPException(
             status_code=500,
             detail=f"Donut inference failed: {str(e)}"
+        )
+
+@app.post("/extract-invoice-json")
+async def extract_invoice_json(
+    file: UploadFile = File(...),
+    task_prompt: str = "<s_invoice>",
+    max_length: int = 512
+):
+    """
+    Complete pipeline: Donut inference + Llama JSON extraction
+    
+    Args:
+        file: Uploaded invoice image file (PNG, JPG, JPEG)
+        task_prompt: Task prompt for Donut model (default: "<s_invoice>")
+        max_length: Maximum length of generated text (default: 512)
+        
+    Returns:
+        JSON response with both Donut prediction and structured Llama extraction
+    """
+    try:
+        app_logger.info(f"Starting complete invoice processing pipeline for file: {file.filename}")
+        
+        # Step 1: Donut Inference (extract text from image)
+        donut_result = await infer_donut(file, task_prompt, max_length)
+        
+        if not donut_result.get("prediction"):
+            raise HTTPException(
+                status_code=500,
+                detail="Donut inference failed to extract text from image"
+            )
+        
+        extracted_text = donut_result["prediction"]
+        app_logger.info(f"Donut extracted text: {extracted_text[:100]}...")
+        
+        # Step 2: Llama JSON Extraction (convert text to structured JSON)
+        app_logger.info("Starting Llama JSON extraction...")
+        try:
+            structured_json = extract_invoice_json_telecom(extracted_text)
+            app_logger.info("Llama JSON extraction completed successfully")
+        except Exception as e:
+            app_logger.error(f"Llama JSON extraction failed: {str(e)}")
+            structured_json = {"error": f"Llama processing failed: {str(e)}"}
+        
+        # Step 3: Combine results
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        response_data = {
+            "filename": file.filename,
+            "pipeline": "Donut + Llama",
+            "donut_prediction": extracted_text,
+            "structured_json": structured_json,
+            "timestamp": timestamp,
+            "device_used": donut_device,
+            "models": {
+                "donut": "naver-clova-ix/donut-base",
+                "llama": "llama3-8b-8192"
+            }
+        }
+        
+        # Save complete response
+        response_file = os.path.join(Config.RESPONSES_DIR, f"complete_invoice_extraction_{timestamp}.json")
+        try:
+            with open(response_file, 'w') as f:
+                json.dump(response_data, f, indent=2)
+            response_data["response_file"] = response_file
+        except Exception as e:
+            app_logger.warning(f"Could not save response file: {e}")
+        
+        app_logger.info(f"Complete invoice processing pipeline completed for {file.filename}")
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        app_logger.error(f"Error during complete invoice processing: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Complete invoice processing failed: {str(e)}"
         )
 
 @app.get("/folder-structure")
