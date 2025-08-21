@@ -50,13 +50,16 @@ app_logger = setup_logger(
 
 app = FastAPI(
     title="Donut Invoice Processing API",
-    description="API for training Donut models and processing invoices with RAG and LLM",
+    description="API for training Donut models (with local files or uploads) and processing invoices with RAG and LLM",
     version="1.0.0"
 )
 
 # Pydantic models for request/response
 class TrainingRequest(BaseModel):
     dataset_path: str
+    num_epochs: Optional[int] = 5
+
+class FileTrainingRequest(BaseModel):
     num_epochs: Optional[int] = 5
 
 class TrainingResponse(BaseModel):
@@ -114,10 +117,10 @@ async def root():
 @app.post("/train-donut", response_model=TrainingResponse)
 async def train_donut_model(request: TrainingRequest):
     """
-    Train and save a Donut model with the provided dataset
+    Train and save a Donut model with a local dataset file path
     
     Args:
-        request: TrainingRequest containing dataset path and number of epochs
+        request: TrainingRequest containing local dataset path and number of epochs
         
     Returns:
         TrainingResponse with training status and message
@@ -144,6 +147,64 @@ async def train_donut_model(request: TrainingRequest):
         else:
             app_logger.error(f"Training failed: {result['message']}")
             raise HTTPException(status_code=500, detail=result["message"])
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        app_logger.error(f"Unexpected error during training: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Unexpected error during training: {str(e)}"
+        )
+
+@app.post("/train-donut-upload", response_model=TrainingResponse)
+async def train_donut_model_with_upload(
+    file: UploadFile = File(...),
+    num_epochs: Optional[int] = Form(5)
+):
+    """
+    Train and save a Donut model with an uploaded dataset file
+    
+    Args:
+        file: Uploaded dataset file (JSON)
+        num_epochs: Number of training epochs (default: 5)
+        
+    Returns:
+        TrainingResponse with training status and message
+    """
+    try:
+        app_logger.info(f"Starting Donut model training with uploaded file: {file.filename}")
+        
+        # Validate file type
+        if not file.filename.endswith('.json'):
+            raise HTTPException(
+                status_code=400,
+                detail="Only JSON dataset files are supported"
+            )
+        
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_file_path = temp_file.name
+        
+        try:
+            # Train the model with the uploaded file
+            result = donut_trainer.train_and_save(
+                dataset_path=temp_file_path,
+                num_epochs=num_epochs
+            )
+            
+            if result["status"] == "success":
+                app_logger.info("Training completed successfully")
+                return TrainingResponse(**result)
+            else:
+                app_logger.error(f"Training failed: {result['message']}")
+                raise HTTPException(status_code=500, detail=result["message"])
+                
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
             
     except HTTPException:
         raise
