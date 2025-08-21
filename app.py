@@ -11,6 +11,10 @@ from datetime import datetime
 from training import DonutTrainer
 from inference import InvoiceProcessor
 from config import Config
+import torch
+from PIL import Image
+from transformers import DonutProcessor, VisionEncoderDecoderModel
+import io
 
 # Configure logging to both file and console
 def setup_logger(name: str, log_file: str):
@@ -80,6 +84,30 @@ class ProcessingResponse(BaseModel):
 donut_trainer = None
 invoice_processor = None
 
+# Donut inference model and processor
+donut_processor = None
+donut_model = None
+donut_device = None
+
+def load_donut_model():
+    """Load the Donut model and processor for inference"""
+    global donut_processor, donut_model, donut_device
+    
+    try:
+        app_logger.info("Loading Donut model and processor for inference...")
+        donut_processor = DonutProcessor.from_pretrained("naver-clova-ix/donut-base")
+        donut_model = VisionEncoderDecoderModel.from_pretrained("naver-clova-ix/donut-base")
+        
+        donut_device = "cuda" if torch.cuda.is_available() else "cpu"
+        donut_model.to(donut_device)
+        
+        app_logger.info(f"Donut inference model loaded successfully on {donut_device}")
+        return True
+        
+    except Exception as e:
+        app_logger.error(f"Error loading Donut inference model: {str(e)}")
+        return False
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize global instances on startup"""
@@ -95,6 +123,10 @@ async def startup_event():
     
     donut_trainer = DonutTrainer()
     invoice_processor = InvoiceProcessor()
+    
+    # Load Donut inference model
+    load_donut_model()
+    
     app_logger.info("Application started successfully")
 
 @app.get("/")
@@ -104,7 +136,12 @@ async def root():
         "message": "Donut Invoice Processing API",
         "endpoints": {
             "train": "POST /train-donut",
-            "process": "POST /process-invoice"
+            "train_upload": "POST /train-donut-upload",
+            "infer_donut": "POST /infer-donut",
+            "process": "POST /process-invoice",
+            "health": "GET /health",
+            "model_status": "GET /model-status",
+            "folder_structure": "GET /folder-structure"
         },
         "folder_structure": {
             "models": Config.MODELS_DIR,
@@ -309,6 +346,101 @@ async def model_status():
         "model_path": Config.MODEL_SAVE_PATH if model_exists else None,
         "message": "Model is ready for inference" if model_exists else "Model not found - please train first"
     }
+
+@app.post("/infer-donut")
+async def infer_donut(
+    file: UploadFile = File(...),
+    task_prompt: str = "<s_invoice>",
+    max_length: int = 512
+):
+    """
+    Perform inference on uploaded invoice image using Donut model
+    
+    Args:
+        file: Uploaded image file (PNG, JPG, JPEG)
+        task_prompt: Task prompt for the model (default: "<s_invoice>")
+        max_length: Maximum length of generated text (default: 512)
+        
+    Returns:
+        JSON response with inference results
+    """
+    try:
+        # Check if Donut model is loaded
+        if donut_processor is None or donut_model is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Donut model not loaded. Please restart the server."
+            )
+        
+        # Validate file type
+        allowed_extensions = {'.png', '.jpg', '.jpeg'}
+        file_extension = os.path.splitext(file.filename)[1].lower()
+        
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not supported. Allowed: {', '.join(allowed_extensions)}"
+            )
+        
+        app_logger.info(f"Processing Donut inference request for file: {file.filename}")
+        
+        # Read and process the uploaded image
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        
+        # Prepare image for model
+        pixel_values = donut_processor(image, return_tensors="pt").pixel_values.to(donut_device)
+        
+        # Set up task prompt
+        decoder_input_id = donut_processor.tokenizer.convert_tokens_to_ids(task_prompt)
+        
+        # Perform inference
+        donut_model.eval()
+        with torch.no_grad():
+            outputs = donut_model.generate(
+                pixel_values,
+                decoder_start_token_id=decoder_input_id,
+                max_length=max_length,
+                early_stopping=True,
+                pad_token_id=donut_processor.tokenizer.pad_token_id
+            )
+        
+        # Decode the output
+        prediction = donut_processor.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+        
+        # Save response with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        response_data = {
+            "filename": file.filename,
+            "task_prompt": task_prompt,
+            "max_length": max_length,
+            "prediction": prediction,
+            "timestamp": timestamp,
+            "device_used": donut_device,
+            "model": "naver-clova-ix/donut-base"
+        }
+        
+        # Save to file (optional)
+        response_file = os.path.join(Config.RESPONSES_DIR, f"donut_inference_{timestamp}.json")
+        try:
+            with open(response_file, 'w') as f:
+                import json
+                json.dump(response_data, f, indent=2)
+            response_data["response_file"] = response_file
+        except Exception as e:
+            app_logger.warning(f"Could not save response file: {e}")
+        
+        app_logger.info(f"Donut inference completed successfully for {file.filename}")
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        app_logger.error(f"Error during Donut inference: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Donut inference failed: {str(e)}"
+        )
 
 @app.get("/folder-structure")
 async def get_folder_structure():
