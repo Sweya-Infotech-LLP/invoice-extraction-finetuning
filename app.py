@@ -397,8 +397,15 @@ async def infer_donut(
         # Prepare image for model
         pixel_values = donut_processor(image, return_tensors="pt").pixel_values.to(donut_device)
         
-        # Set up task prompt
-        decoder_input_id = donut_processor.tokenizer.convert_tokens_to_ids(task_prompt)
+        # Set up task prompt - try different approaches
+        try:
+            decoder_input_id = donut_processor.tokenizer.convert_tokens_to_ids(task_prompt)
+            app_logger.info(f"Task prompt '{task_prompt}' converted to ID: {decoder_input_id}")
+        except Exception as e:
+            app_logger.warning(f"Could not convert task prompt '{task_prompt}' to ID: {e}")
+            # Fallback to empty string
+            decoder_input_id = donut_processor.tokenizer.convert_tokens_to_ids("")
+            app_logger.info(f"Using fallback empty string, ID: {decoder_input_id}")
         
         # Perform inference
         donut_model.eval()
@@ -414,15 +421,27 @@ async def infer_donut(
                 pixel_values,
                 decoder_start_token_id=decoder_input_id,
                 max_length=max_length,
-                early_stopping=True,
+                early_stopping=False,  # Disable early stopping for greedy
                 pad_token_id=donut_processor.tokenizer.pad_token_id,
                 num_beams=1,  # Use greedy decoding
-                do_sample=False  # Disable sampling
+                do_sample=False,  # Disable sampling
+                repetition_penalty=1.2,  # Prevent repetition
+                length_penalty=1.0,  # Neutral length penalty
+                no_repeat_ngram_size=3  # Prevent 3-gram repetition
             )
         
-        # Debug: Print output shapes
+        # Debug: Print output shapes and analyze tokens
         app_logger.info(f"Generated outputs shape: {outputs.shape}")
         app_logger.info(f"Generated outputs: {outputs}")
+        
+        # Analyze the tokens
+        unique_tokens = torch.unique(outputs[0]).tolist()
+        app_logger.info(f"Unique tokens generated: {unique_tokens}")
+        
+        # Decode individual tokens for debugging
+        for i, token_id in enumerate(outputs[0][:20]):  # First 20 tokens
+            token_text = donut_processor.tokenizer.decode([token_id])
+            app_logger.info(f"Token {i}: ID={token_id}, Text='{token_text}'")
         
         # Decode the output
         prediction = donut_processor.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
