@@ -372,6 +372,12 @@ async def infer_donut(
                 detail="Donut model not loaded. Please restart the server."
             )
         
+        # Additional model validation
+        app_logger.info(f"Model loaded: {donut_model is not None}")
+        app_logger.info(f"Processor loaded: {donut_processor is not None}")
+        app_logger.info(f"Model device: {donut_device}")
+        app_logger.info(f"Model parameters count: {sum(p.numel() for p in donut_model.parameters())}")
+        
         # Validate file type
         allowed_extensions = {'.png', '.jpg', '.jpeg'}
         file_extension = os.path.splitext(file.filename)[1].lower()
@@ -396,17 +402,31 @@ async def infer_donut(
         
         # Perform inference
         donut_model.eval()
+        
+        # Debug: Print input shapes and device
+        app_logger.info(f"Input pixel_values shape: {pixel_values.shape}")
+        app_logger.info(f"Input device: {pixel_values.device}")
+        app_logger.info(f"Model device: {next(donut_model.parameters()).device}")
+        app_logger.info(f"Decoder input ID: {decoder_input_id}")
+        
         with torch.no_grad():
             outputs = donut_model.generate(
                 pixel_values,
                 decoder_start_token_id=decoder_input_id,
                 max_length=max_length,
                 early_stopping=True,
-                pad_token_id=donut_processor.tokenizer.pad_token_id
+                pad_token_id=donut_processor.tokenizer.pad_token_id,
+                num_beams=1,  # Use greedy decoding
+                do_sample=False  # Disable sampling
             )
+        
+        # Debug: Print output shapes
+        app_logger.info(f"Generated outputs shape: {outputs.shape}")
+        app_logger.info(f"Generated outputs: {outputs}")
         
         # Decode the output
         prediction = donut_processor.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+        app_logger.info(f"Raw prediction: '{prediction}'")
         
         # Save response with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
