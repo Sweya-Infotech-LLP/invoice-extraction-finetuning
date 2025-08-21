@@ -398,14 +398,35 @@ async def infer_donut(
         pixel_values = donut_processor(image, return_tensors="pt").pixel_values.to(donut_device)
         
         # Set up task prompt - try different approaches
-        try:
-            decoder_input_id = donut_processor.tokenizer.convert_tokens_to_ids(task_prompt)
-            app_logger.info(f"Task prompt '{task_prompt}' converted to ID: {decoder_input_id}")
-        except Exception as e:
-            app_logger.warning(f"Could not convert task prompt '{task_prompt}' to ID: {e}")
-            # Fallback to empty string
+        task_prompts_to_try = [
+            task_prompt,  # Original prompt
+            "<s_document>",  # Document task
+            "<s_question>",  # Question task
+            "<s_caption>",   # Caption task
+            "",              # Empty string
+            "Extract text from invoice:",  # Natural language
+            "Invoice text:"  # Simple prompt
+        ]
+        
+        decoder_input_id = None
+        for prompt in task_prompts_to_try:
+            try:
+                decoder_input_id = donut_processor.tokenizer.convert_tokens_to_ids(prompt)
+                app_logger.info(f"Task prompt '{prompt}' converted to ID: {decoder_input_id}")
+                # Check if it's not the unknown token
+                if decoder_input_id != 3:  # Avoid <unk> token
+                    app_logger.info(f"Using task prompt: '{prompt}' with ID: {decoder_input_id}")
+                    break
+                else:
+                    app_logger.warning(f"Task prompt '{prompt}' maps to <unk> token, trying next...")
+            except Exception as e:
+                app_logger.warning(f"Could not convert task prompt '{prompt}' to ID: {e}")
+                continue
+        
+        if decoder_input_id is None:
+            # Final fallback to empty string
             decoder_input_id = donut_processor.tokenizer.convert_tokens_to_ids("")
-            app_logger.info(f"Using fallback empty string, ID: {decoder_input_id}")
+            app_logger.info(f"Using final fallback empty string, ID: {decoder_input_id}")
         
         # Perform inference
         donut_model.eval()
@@ -427,7 +448,9 @@ async def infer_donut(
                 do_sample=False,  # Disable sampling
                 repetition_penalty=1.2,  # Prevent repetition
                 length_penalty=1.0,  # Neutral length penalty
-                no_repeat_ngram_size=3  # Prevent 3-gram repetition
+                no_repeat_ngram_size=3,  # Prevent 3-gram repetition
+                min_length=5,  # Force minimum generation length
+                eos_token_id=donut_processor.tokenizer.eos_token_id  # Explicit end token
             )
         
         # Debug: Print output shapes and analyze tokens
@@ -442,6 +465,11 @@ async def infer_donut(
         for i, token_id in enumerate(outputs[0][:20]):  # First 20 tokens
             token_text = donut_processor.tokenizer.decode([token_id])
             app_logger.info(f"Token {i}: ID={token_id}, Text='{token_text}'")
+        
+        # Check if we got meaningful content
+        meaningful_tokens = [t for t in outputs[0] if t not in [2, 3]]  # Exclude </s> and <unk>
+        app_logger.info(f"Meaningful tokens (excluding special): {meaningful_tokens}")
+        app_logger.info(f"Number of meaningful tokens: {len(meaningful_tokens)}")
         
         # Decode the output
         prediction = donut_processor.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
