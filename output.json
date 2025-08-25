@@ -1,0 +1,6 @@
+[
+  {
+    "image": "/home/alisha/invoice_extraction/invoice-extraction-finetuning/Solaras-test-18-1.png",
+    "ground_truth": "{\"vendorName\": \"Solarus\", \"invoiceNumber\": \"31777701\", \"accountNumber\": \"000884622\", ... }"
+  }
+]
